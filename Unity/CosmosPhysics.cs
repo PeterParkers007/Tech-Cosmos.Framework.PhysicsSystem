@@ -1,6 +1,7 @@
 using TechCosmos.Core.Runtime;
 using TechCosmos.PhysicsSystem.Runtime;
 using UnityEngine;
+using RaycastHit = TechCosmos.PhysicsSystem.Runtime.RaycastHit;
 
 namespace TechCosmos.PhysicsSystem.Unity
 {
