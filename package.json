@@ -1,0 +1,25 @@
+{
+  "name": "com.techcosmos.physicssystem",
+  "displayName": "Tech-Cosmos Physics System",
+  "version": "1.0.0",
+  "description": "Pure C# physics framework that replaces Unity Physics: spatial-hash broad phase, impulse solver, raycast/overlap queries, and Unity adapter components (CosmosPhysics, CosmosRigidbody, CosmosCollider). Runtime layer has no engine references.",
+  "keywords": [
+    "physics",
+    "collision",
+    "raycast",
+    "framework",
+    "decoupled",
+    "tech-cosmos"
+  ],
+  "category": "Framework",
+  "author": {
+    "name": "Tech-Cosmos",
+    "email": "3427463164@qq.com",
+    "url": "https://github.com/PeterParkers007/Tech-Cosmos"
+  },
+  "unity": "2022.3",
+  "unityRelease": "0f1",
+  "dependencies": {
+    "com.techcosmos.core": "1.1.0"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "TechCosmos.PhysicsSystem.Unity",
+  "references": [
+    "TechCosmos.PhysicsSystem.Runtime",
+    "TechCosmos.Core.Runtime"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}
