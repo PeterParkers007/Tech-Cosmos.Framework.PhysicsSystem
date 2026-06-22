@@ -313,7 +313,7 @@ namespace TechCosmos.PhysicsSystem.Runtime
             if (distSq < 1e-8f) { delta = new Float3(0, 1, 0); distSq = 1f; }
 
             float dist = (float)Math.Sqrt(distSq);
-            Float3 normal = delta / dist;
+            Float3 normal = Float3Math.Normalize(delta);
 
             // 粗略 penetration（实际应完整 SAT，这里用 extent 投影近似）
             float penA = a.Shape.size.x * Math.Abs(normal.x) + a.Shape.size.y * Math.Abs(normal.y) + a.Shape.size.z * Math.Abs(normal.z);

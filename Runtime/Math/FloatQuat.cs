@@ -54,7 +54,7 @@ namespace TechCosmos.PhysicsSystem.Runtime
         {
             FloatQuat q = Normalized();
             FloatQuat v = new FloatQuat(vector.x, vector.y, vector.z, 0f);
-            FloatQuat result = Multiply(Multiply(q, v), Conjugate(q));
+            FloatQuat result = Multiply(Multiply(q, v), q.Conjugate());
             return new Float3(result.x, result.y, result.z);
         }
 

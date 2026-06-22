@@ -10,7 +10,7 @@ namespace TechCosmos.PhysicsSystem.Runtime
     /// </summary>
     public sealed class PhysicsWorld
     {
-        private readonly PhysicsSettings _settings;
+        private PhysicsSettings _settings;
         private readonly BroadPhaseSpatialHash _broadPhase;
         private readonly List<PhysicsBody> _bodies = new List<PhysicsBody>(128);
         private readonly List<PhysicsBody> _activeBodies = new List<PhysicsBody>(128);
