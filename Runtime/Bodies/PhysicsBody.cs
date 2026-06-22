@@ -59,25 +59,26 @@ namespace TechCosmos.PhysicsSystem.Runtime
     /// </summary>
     public sealed class PhysicsBody
     {
-        internal PhysicsBodyHandle Handle;
-        internal int SlotIndex = -1;
+        public PhysicsBodyHandle Handle { get; internal set; }
 
-        public BodyType BodyType { get; internal set; }
+        public BodyType BodyType { get; set; }
         public Float3 Position { get; internal set; }
         public FloatQuat Rotation { get; internal set; }
         public Float3 Velocity { get; set; }
         public Float3 AngularVelocity { get; set; }
-        public float Mass { get; internal set; }
-        public bool IsTrigger { get; internal set; }
+        public float Mass { get; set; }
+        public bool IsTrigger { get; set; }
         public bool UseGravity { get; set; }
         public float LinearDrag { get; set; }
         public float AngularDrag { get; set; }
         public CollisionFilter Filter { get; internal set; }
         public PhysicsMaterial Material { get; internal set; }
-        public ColliderShape Shape { get; internal set; }
+        public ColliderShape Shape { get; set; }
         public object UserData { get; set; }
         public bool IsSleeping { get; internal set; }
-        public bool IsEnabled { get; internal set; } = true;
+        public bool IsEnabled { get; set; } = true;
+
+        internal int SlotIndex = -1;
 
         // 新增：per-body 性能/行为控制（超越 Unity Rigidbody 的黑箱）
         public int SolverIterationsOverride { get; set; }   // 0 = 使用世界默认
@@ -87,7 +88,7 @@ namespace TechCosmos.PhysicsSystem.Runtime
         internal float InverseMass => BodyType == BodyType.Dynamic && Mass > 0f ? 1f / Mass : 0f;
         internal float InverseInertia => InverseMass; // 简化，实际应为张量
 
-        internal void WakeUp() => IsSleeping = false;
+        public void WakeUp() => IsSleeping = false;
 
         public void MovePosition(Float3 target) => Position = target;
         public void MoveRotation(FloatQuat target) => Rotation = target.Normalized();
