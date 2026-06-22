@@ -12,6 +12,7 @@ namespace TechCosmos.PhysicsSystem.Runtime
         public float penetration;
         public Float3 point;
         public bool isTriggerPair;
+        public float warmStartNormalImpulse;
     }
 
     internal static class NarrowPhase
@@ -304,27 +305,7 @@ namespace TechCosmos.PhysicsSystem.Runtime
 
         private static bool BoxBoxDetailed(PhysicsBody a, PhysicsBody b, out ContactManifold contact)
         {
-            contact = default;
-            // 改进的 Box-Box：使用分离轴 + 最近点（简化版 SAT）
-            Float3 centerA = a.Shape.GetWorldCenter(a.Position, a.Rotation);
-            Float3 centerB = b.Shape.GetWorldCenter(b.Position, b.Rotation);
-            Float3 delta = centerB - centerA;
-            float distSq = Float3Math.Dot(delta, delta);
-            if (distSq < 1e-8f) { delta = new Float3(0, 1, 0); distSq = 1f; }
-
-            float dist = (float)Math.Sqrt(distSq);
-            Float3 normal = Float3Math.Normalize(delta);
-
-            // 粗略 penetration（实际应完整 SAT，这里用 extent 投影近似）
-            float penA = a.Shape.size.x * Math.Abs(normal.x) + a.Shape.size.y * Math.Abs(normal.y) + a.Shape.size.z * Math.Abs(normal.z);
-            float penB = b.Shape.size.x * Math.Abs(normal.x) + b.Shape.size.y * Math.Abs(normal.y) + b.Shape.size.z * Math.Abs(normal.z);
-            float penetration = (penA + penB) * 0.5f - dist; // 简化
-            if (penetration <= 0f) return false;
-
-            contact.normal = normal;
-            contact.penetration = penetration;
-            contact.point = centerA + normal * (a.Shape.size.x * 0.5f);
-            return true;
+            return BoxContactGenerator.Generate(a, b, out contact);
         }
 
         private static bool SphereCapsuleDetailed(PhysicsBody sphere, PhysicsBody capsule, out ContactManifold contact)
@@ -409,14 +390,25 @@ namespace TechCosmos.PhysicsSystem.Runtime
     {
         private readonly float _cellSize;
         private readonly Dictionary<long, List<PhysicsBody>> _cells = new Dictionary<long, List<PhysicsBody>>();
+        private readonly Stack<List<PhysicsBody>> _listPool = new Stack<List<PhysicsBody>>();
         private readonly List<PhysicsBody> _queryBuffer = new List<PhysicsBody>(64);
+        private int _queryGeneration;
 
         public BroadPhaseSpatialHash(float cellSize)
         {
             _cellSize = Math.Max(cellSize, 0.25f);
         }
 
-        public void Clear() => _cells.Clear();
+        public void Clear()
+        {
+            foreach (var list in _cells.Values)
+            {
+                list.Clear();
+                _listPool.Push(list);
+            }
+
+            _cells.Clear();
+        }
 
         public void Insert(PhysicsBody body)
         {
@@ -435,7 +427,7 @@ namespace TechCosmos.PhysicsSystem.Runtime
                 long key = Key(x, y, z);
                 if (!_cells.TryGetValue(key, out var list))
                 {
-                    list = new List<PhysicsBody>(4);
+                    list = RentList();
                     _cells[key] = list;
                 }
 
@@ -446,6 +438,10 @@ namespace TechCosmos.PhysicsSystem.Runtime
         public List<PhysicsBody> Query(Float3 min, Float3 max)
         {
             _queryBuffer.Clear();
+            _queryGeneration++;
+            if (_queryGeneration == int.MaxValue)
+                _queryGeneration = 1;
+
             int minX = Floor(min.x);
             int minY = Floor(min.y);
             int minZ = Floor(min.z);
@@ -461,18 +457,27 @@ namespace TechCosmos.PhysicsSystem.Runtime
                 for (int i = 0; i < list.Count; i++)
                 {
                     PhysicsBody body = list[i];
-                    // AABB pruning（原实现缺失，导致性能差）
+                    if (body.BroadPhaseQueryStamp == _queryGeneration) continue;
+
                     body.Shape.ComputeWorldBounds(body.Position, body.Rotation, out Float3 bmin, out Float3 bmax);
                     if (bmax.x < min.x || bmin.x > max.x ||
                         bmax.y < min.y || bmin.y > max.y ||
                         bmax.z < min.z || bmin.z > max.z) continue;
 
-                    if (!_queryBuffer.Contains(body))
-                        _queryBuffer.Add(body);
+                    body.BroadPhaseQueryStamp = _queryGeneration;
+                    _queryBuffer.Add(body);
                 }
             }
 
             return _queryBuffer;
+        }
+
+        private List<PhysicsBody> RentList()
+        {
+            if (_listPool.Count > 0)
+                return _listPool.Pop();
+
+            return new List<PhysicsBody>(4);
         }
 
         private int Floor(float value) => (int)Math.Floor(value / _cellSize);

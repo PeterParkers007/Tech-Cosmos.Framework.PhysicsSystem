@@ -19,6 +19,8 @@ namespace TechCosmos.PhysicsSystem.Unity
         [SerializeField] private float linearDrag;
         [SerializeField] private float angularDrag;
         [SerializeField] private bool isTrigger;
+        [SerializeField] private bool ccdEnabled;
+        [SerializeField] private float ccdRadius;
 
         private PhysicsBody _body;
         private CosmosCollider _collider;
@@ -135,6 +137,8 @@ namespace TechCosmos.PhysicsSystem.Unity
                 };
 
                 _body = world.CreateBody(descriptor);
+                _body.CcdEnabled = ccdEnabled;
+                _body.CcdRadius = ccdRadius;
                 _collider.BindBody(_body);
             }
             else

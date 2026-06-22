@@ -4,6 +4,12 @@ using TechCosmos.Core.Runtime;
 
 namespace TechCosmos.PhysicsSystem.Runtime
 {
+    internal struct CachedContact
+    {
+        public ContactManifold manifold;
+        public float normalImpulse;
+    }
+
     /// <summary>
     /// 纯物理世界：模拟、查询、碰撞回调的统一入口。
     /// API 语义对齐 Unity Physics，但不依赖 UnityEngine。
@@ -16,10 +22,18 @@ namespace TechCosmos.PhysicsSystem.Runtime
         private readonly List<PhysicsBody> _activeBodies = new List<PhysicsBody>(128);
         private readonly Dictionary<PhysicsBodyHandle, PhysicsBody> _lookup = new Dictionary<PhysicsBodyHandle, PhysicsBody>();
         private readonly HashSet<(int, int)> _activePairs = new HashSet<(int, int)>();
+        private readonly HashSet<(int, int)> _newPairsScratch = new HashSet<(int, int)>();
+        private readonly Dictionary<(int, int), CachedContact> _contactCache = new Dictionary<(int, int), CachedContact>();
         private readonly List<ContactManifold> _contacts = new List<ContactManifold>(64);
+        private readonly List<(int, int)> _staleCacheKeys = new List<(int, int)>(32);
         private readonly List<RaycastHit> _raycastScratch = new List<RaycastHit>(32);
+        private readonly List<PhysicsJoint> _joints = new List<PhysicsJoint>(32);
+        private readonly Dictionary<PhysicsJointHandle, PhysicsJoint> _jointLookup = new Dictionary<PhysicsJointHandle, PhysicsJoint>();
+        private readonly HashSet<(int, int)> _nonCollidingJointPairs = new HashSet<(int, int)>();
         private int _nextId;
         private int _nextGeneration = 1;
+        private int _nextJointId;
+        private int _nextJointGeneration = 1;
 
         public PhysicsSettings Settings => _settings;
 
@@ -32,6 +46,8 @@ namespace TechCosmos.PhysicsSystem.Runtime
         public event Action<CollisionEnterEvent> CollisionEnter;
         public event Action<CollisionStayEvent> CollisionStay;
         public event Action<CollisionExitEvent> CollisionExit;
+
+        public IReadOnlyList<PhysicsJoint> Joints => _joints;
 
         public PhysicsWorld() : this(PhysicsSettings.Default) { }
 
@@ -79,6 +95,50 @@ namespace TechCosmos.PhysicsSystem.Runtime
             _lookup.Remove(handle);
             body.IsEnabled = false;
             body.Handle = new PhysicsBodyHandle(body.Handle.Id, _nextGeneration++);
+            RemoveCachedContactsForBody(body.Handle.Id);
+            RemoveJointsForBody(body.Handle.Id);
+        }
+
+        public PhysicsJoint CreateJoint(in PhysicsJointDescriptor descriptor)
+        {
+            if (!TryGetBody(descriptor.bodyA, out PhysicsBody bodyA) || !TryGetBody(descriptor.bodyB, out PhysicsBody bodyB))
+                throw new InvalidOperationException("CreateJoint requires valid body handles.");
+
+            var joint = new PhysicsJoint
+            {
+                Handle = new PhysicsJointHandle(_nextJointId++, _nextJointGeneration),
+                Type = descriptor.type,
+                BodyA = bodyA,
+                BodyB = bodyB,
+                LocalAnchorA = descriptor.localAnchorA,
+                LocalAnchorB = descriptor.localAnchorB,
+                LocalAxisA = descriptor.localAxisA,
+                MinDistance = descriptor.minDistance,
+                MaxDistance = descriptor.maxDistance,
+                RestLength = descriptor.restLength,
+                SpringStiffness = descriptor.springStiffness,
+                SpringDamping = descriptor.springDamping,
+                CollideConnected = descriptor.collideConnected
+            };
+
+            _joints.Add(joint);
+            _jointLookup[joint.Handle] = joint;
+            RefreshJointCollisionFilter(joint);
+            return joint;
+        }
+
+        public bool TryGetJoint(PhysicsJointHandle handle, out PhysicsJoint joint) =>
+            _jointLookup.TryGetValue(handle, out joint);
+
+        public void DestroyJoint(PhysicsJointHandle handle)
+        {
+            if (!TryGetJoint(handle, out var joint)) return;
+
+            _jointLookup.Remove(handle);
+            _joints.Remove(joint);
+            RemoveJointCollisionFilter(joint);
+            joint.IsEnabled = false;
+            joint.Handle = new PhysicsJointHandle(joint.Handle.Id, _nextJointGeneration++);
         }
 
         public SimulationStats LastStats { get; private set; }
@@ -125,7 +185,15 @@ namespace TechCosmos.PhysicsSystem.Runtime
                 PhysicsBody body = _bodies[i];
                 if (!body.IsEnabled) continue;
                 if (body.BodyType == BodyType.Dynamic && (!_settings.enableSleeping || !body.IsSleeping))
-                    CollisionSolver.Integrate(body, _settings, deltaTime);
+                {
+                    Float3 startPosition = body.Position;
+                    CollisionSolver.IntegrateVelocity(body, _settings, deltaTime);
+                    if (CcdSolver.NeedsCcd(body, _settings))
+                        CcdSolver.ApplyMotion(body, startPosition, deltaTime, _bodies);
+                    else
+                        body.Position = startPosition + body.Velocity * deltaTime;
+                    CollisionSolver.UpdateSleeping(body, _settings);
+                }
                 _activeBodies.Add(body);
             }
             stats.integrationTimeMs += sw.Elapsed.TotalMilliseconds; sw.Restart();
@@ -138,7 +206,7 @@ namespace TechCosmos.PhysicsSystem.Runtime
 
             // 3. Narrowphase + events
             _contacts.Clear();
-            var newPairs = new HashSet<(int, int)>();
+            _newPairsScratch.Clear();
 
             for (int i = 0; i < _activeBodies.Count; i++)
             {
@@ -150,13 +218,25 @@ namespace TechCosmos.PhysicsSystem.Runtime
                 {
                     PhysicsBody b = candidates[j];
                     if (ReferenceEquals(a, b) || a.Handle.Id > b.Handle.Id) continue;
-                    if (!NarrowPhase.TestPair(a, b, out ContactManifold contact)) continue;
+                    if (ShouldSkipJointCollision(a.Handle.Id, b.Handle.Id)) continue;
 
-                    _contacts.Add(contact);
                     int idA = a.Handle.Id;
                     int idB = b.Handle.Id;
                     var pairKey = (idA, idB);
-                    newPairs.Add(pairKey);
+
+                    if (!NarrowPhase.TestPair(a, b, out ContactManifold contact))
+                    {
+                        if (!_contactCache.TryGetValue(pairKey, out CachedContact persisted))
+                            continue;
+
+                        contact = persisted.manifold;
+                        contact.BodyA = a;
+                        contact.BodyB = b;
+                    }
+
+                    ApplyCachedContactData(ref contact, pairKey);
+                    _contacts.Add(contact);
+                    _newPairsScratch.Add(pairKey);
 
                     bool wasActive = _activePairs.Contains(pairKey);
                     if (!wasActive)
@@ -168,23 +248,38 @@ namespace TechCosmos.PhysicsSystem.Runtime
 
             foreach (var pair in _activePairs)
             {
-                if (newPairs.Contains(pair)) continue;
+                if (_newPairsScratch.Contains(pair)) continue;
                 if (!TryFindBodiesByPair(pair, out var bodyA, out var bodyB)) continue;
                 CollisionExit?.Invoke(new CollisionExitEvent(bodyA.Handle, bodyB.Handle, bodyA.UserData, bodyB.UserData, bodyA.IsTrigger || bodyB.IsTrigger));
+                _contactCache.Remove(pair);
             }
 
             _activePairs.Clear();
-            foreach (var pair in newPairs) _activePairs.Add(pair);
+            foreach (var pair in _newPairsScratch)
+                _activePairs.Add(pair);
+
+            RemoveStaleContactCacheEntries();
 
             stats.narrowphaseTimeMs += sw.Elapsed.TotalMilliseconds; sw.Restart();
 
             // 4. Solver
             int iters = _settings.velocityIterations;
-            for (int iteration = 0; iteration < iters; iteration++)
+            for (int i = 0; i < _contacts.Count; i++)
             {
-                for (int i = 0; i < _contacts.Count; i++)
-                    CollisionSolver.Resolve(_contacts[i], _settings);
+                ContactManifold contact = _contacts[i];
+                float accumulatedImpulse = 0f;
+
+                for (int iteration = 0; iteration < iters; iteration++)
+                {
+                    CollisionSolver.Resolve(ref contact, _settings, iteration == 0, out float normalImpulse);
+                    accumulatedImpulse += normalImpulse;
+                }
+
+                _contacts[i] = contact;
+                UpdateCachedNormalImpulse(contact, accumulatedImpulse);
             }
+
+            JointSolver.Solve(_joints, deltaTime);
             stats.solverTimeMs += sw.Elapsed.TotalMilliseconds;
             stats.contactCount = _contacts.Count;
         }
@@ -334,6 +429,111 @@ namespace TechCosmos.PhysicsSystem.Runtime
             }
 
             return bodyA != null && bodyB != null;
+        }
+
+        private void ApplyCachedContactData(ref ContactManifold contact, (int idA, int idB) pairKey)
+        {
+            if (!_contactCache.TryGetValue(pairKey, out CachedContact cached))
+            {
+                _contactCache[pairKey] = new CachedContact { manifold = contact, normalImpulse = 0f };
+                return;
+            }
+
+            contact.warmStartNormalImpulse = cached.normalImpulse;
+
+            if (Float3Math.Dot(cached.manifold.normal, contact.normal) < 0f)
+                contact.normal = contact.normal * -1f;
+
+            float alignment = Float3Math.Dot(cached.manifold.normal, contact.normal);
+            if (alignment > 0.5f && PhysicsMath.TryNormalize(
+                    cached.manifold.normal * 0.25f + contact.normal * 0.75f,
+                    out Float3 blendedNormal))
+            {
+                contact.normal = blendedNormal;
+            }
+
+            _contactCache[pairKey] = new CachedContact
+            {
+                manifold = contact,
+                normalImpulse = cached.normalImpulse
+            };
+        }
+
+        private void UpdateCachedNormalImpulse(in ContactManifold contact, float normalImpulse)
+        {
+            var pairKey = (contact.BodyA.Handle.Id, contact.BodyB.Handle.Id);
+            if (!_contactCache.TryGetValue(pairKey, out CachedContact cached))
+                return;
+
+            cached.manifold = contact;
+            cached.normalImpulse = normalImpulse;
+            _contactCache[pairKey] = cached;
+        }
+
+        private void RemoveStaleContactCacheEntries()
+        {
+            _staleCacheKeys.Clear();
+            foreach (var pair in _contactCache.Keys)
+            {
+                if (!_newPairsScratch.Contains(pair))
+                    _staleCacheKeys.Add(pair);
+            }
+
+            for (int i = 0; i < _staleCacheKeys.Count; i++)
+                _contactCache.Remove(_staleCacheKeys[i]);
+        }
+
+        private void RemoveCachedContactsForBody(int bodyId)
+        {
+            _staleCacheKeys.Clear();
+            foreach (var pair in _contactCache.Keys)
+            {
+                if (pair.Item1 == bodyId || pair.Item2 == bodyId)
+                    _staleCacheKeys.Add(pair);
+            }
+
+            for (int i = 0; i < _staleCacheKeys.Count; i++)
+                _contactCache.Remove(_staleCacheKeys[i]);
+        }
+
+        private bool ShouldSkipJointCollision(int idA, int idB)
+        {
+            if (idA > idB)
+                (idA, idB) = (idB, idA);
+            return _nonCollidingJointPairs.Contains((idA, idB));
+        }
+
+        private void RefreshJointCollisionFilter(PhysicsJoint joint)
+        {
+            int idA = joint.BodyA.Handle.Id;
+            int idB = joint.BodyB.Handle.Id;
+            if (idA > idB)
+                (idA, idB) = (idB, idA);
+
+            var pairKey = (idA, idB);
+            if (!joint.CollideConnected)
+                _nonCollidingJointPairs.Add(pairKey);
+            else
+                _nonCollidingJointPairs.Remove(pairKey);
+        }
+
+        private void RemoveJointCollisionFilter(PhysicsJoint joint)
+        {
+            int idA = joint.BodyA.Handle.Id;
+            int idB = joint.BodyB.Handle.Id;
+            if (idA > idB)
+                (idA, idB) = (idB, idA);
+            _nonCollidingJointPairs.Remove((idA, idB));
+        }
+
+        private void RemoveJointsForBody(int bodyId)
+        {
+            for (int i = _joints.Count - 1; i >= 0; i--)
+            {
+                PhysicsJoint joint = _joints[i];
+                if (joint.BodyA.Handle.Id != bodyId && joint.BodyB.Handle.Id != bodyId) continue;
+                DestroyJoint(joint.Handle);
+            }
         }
     }
 }

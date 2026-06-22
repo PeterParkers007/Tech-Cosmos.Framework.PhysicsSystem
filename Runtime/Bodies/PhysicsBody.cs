@@ -79,6 +79,7 @@ namespace TechCosmos.PhysicsSystem.Runtime
         public bool IsEnabled { get; set; } = true;
 
         internal int SlotIndex = -1;
+        internal int BroadPhaseQueryStamp;
 
         // 新增：per-body 性能/行为控制（超越 Unity Rigidbody 的黑箱）
         public int SolverIterationsOverride { get; set; }   // 0 = 使用世界默认

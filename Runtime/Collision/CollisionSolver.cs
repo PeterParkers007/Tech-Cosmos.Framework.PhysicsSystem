@@ -6,8 +6,9 @@ namespace TechCosmos.PhysicsSystem.Runtime
 {
     internal static class CollisionSolver
     {
-        public static void Resolve(in ContactManifold contact, in PhysicsSettings settings)
+        public static void Resolve(ref ContactManifold contact, in PhysicsSettings settings, bool applyWarmStart, out float normalImpulse)
         {
+            normalImpulse = 0f;
             if (contact.isTriggerPair) return;
 
             PhysicsBody a = contact.BodyA;
@@ -19,7 +20,19 @@ namespace TechCosmos.PhysicsSystem.Runtime
             float invMassSum = invMassA + invMassB;
             if (invMassSum <= 0f) return;
 
-            Float3 correction = contact.normal * (contact.penetration / invMassSum);
+            if (applyWarmStart && contact.warmStartNormalImpulse > 0f)
+            {
+                Float3 warmImpulse = contact.normal * contact.warmStartNormalImpulse;
+                if (a.BodyType == BodyType.Dynamic)
+                    a.Velocity = a.Velocity - warmImpulse * invMassA;
+                if (b.BodyType == BodyType.Dynamic)
+                    b.Velocity = b.Velocity + warmImpulse * invMassB;
+            }
+
+            const float baumgarte = 0.2f;
+            const float slop = 0.005f;
+            float penetration = Math.Max(contact.penetration - slop, 0f);
+            Float3 correction = contact.normal * (baumgarte * penetration / invMassSum);
             if (a.BodyType == BodyType.Dynamic)
                 a.Position = a.Position - correction * invMassA;
             if (b.BodyType == BodyType.Dynamic)
@@ -32,6 +45,7 @@ namespace TechCosmos.PhysicsSystem.Runtime
             float restitution = a.Material.CombineBounciness(b.Material);
             float impulseScalar = -(1f + restitution) * normalVelocity / invMassSum;
             Float3 impulse = contact.normal * impulseScalar;
+            normalImpulse = impulseScalar;
 
             if (a.BodyType == BodyType.Dynamic)
             {
@@ -57,7 +71,7 @@ namespace TechCosmos.PhysicsSystem.Runtime
             }
         }
 
-        public static void Integrate(PhysicsBody body, in PhysicsSettings settings, float deltaTime)
+        public static void IntegrateVelocity(PhysicsBody body, in PhysicsSettings settings, float deltaTime)
         {
             if (body.BodyType != BodyType.Dynamic || !body.IsEnabled) return;
 
@@ -75,11 +89,23 @@ namespace TechCosmos.PhysicsSystem.Runtime
                 float drag = Math.Max(0f, 1f - body.AngularDrag * deltaTime);
                 body.AngularVelocity = body.AngularVelocity * drag;
             }
+        }
 
-            body.Position = body.Position + body.Velocity * deltaTime;
+        public static void UpdateSleeping(PhysicsBody body, in PhysicsSettings settings)
+        {
+            if (body.BodyType != BodyType.Dynamic || !body.IsEnabled) return;
 
             float speedSq = Float3Math.Dot(body.Velocity, body.Velocity);
             body.IsSleeping = speedSq <= settings.linearSleepThreshold * settings.linearSleepThreshold;
+        }
+
+        public static void Integrate(PhysicsBody body, in PhysicsSettings settings, float deltaTime)
+        {
+            if (body.BodyType != BodyType.Dynamic || !body.IsEnabled) return;
+
+            IntegrateVelocity(body, settings, deltaTime);
+            body.Position = body.Position + body.Velocity * deltaTime;
+            UpdateSleeping(body, settings);
         }
     }
 }
